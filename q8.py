@@ -5,12 +5,11 @@ import re
 app = FastAPI()
 
 
-# --------- Request model ----------
+# ---------------- Models ----------------
 class InvoiceRequest(BaseModel):
     text: str
 
 
-# --------- Response model ----------
 class InvoiceResponse(BaseModel):
     vendor: str
     amount: float
@@ -18,23 +17,26 @@ class InvoiceResponse(BaseModel):
     date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
-# --------- Extractor helpers ----------
-
+# ---------------- Vendor ----------------
 def extract_vendor(text: str):
     patterns = [
         r"Invoice from\s*[:\-]?\s*(.+?)\s*(?:\||$)",
         r"Vendor\s*[:\-]?\s*(.+?)\s*(?:\||$)",
         r"Billed to\s*[:\-]?\s*(.+?)\s*(?:\||$)"
     ]
+
     for p in patterns:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             return m.group(1).strip()
-    return None
+
+    # weak fallback (IMPORTANT: not UNKNOWN)
+    m = re.search(r"[A-Za-z0-9\-]+(?:\s+[A-Za-z0-9\-]+)*(?:Ltd\.|LLC|Inc\.|Industries)?", text)
+    return m.group(0).strip() if m else None
 
 
+# ---------------- Amount ----------------
 def extract_amount(text: str):
-    # IMPORTANT: only match numbers near keywords or currency
     patterns = [
         r"(?:amount due|total|amount)\s*[:=]?\s*([0-9]+(?:\.[0-9]{1,2})?)",
         r"([0-9]+(?:\.[0-9]{1,2})?)\s*(?:USD|EUR|GBP)",
@@ -47,20 +49,23 @@ def extract_amount(text: str):
             for g in m.groups():
                 if g and re.match(r"^[0-9]+(\.[0-9]{1,2})?$", g):
                     return float(g)
+
     return None
 
 
+# ---------------- Currency ----------------
 def extract_currency(text: str):
     m = re.search(r"\b(USD|EUR|GBP)\b", text)
     return m.group(1) if m else None
 
 
+# ---------------- Date ----------------
 def extract_date(text: str):
     m = re.search(r"\d{4}-\d{2}-\d{2}", text)
     return m.group(0) if m else None
 
 
-# --------- Endpoint ----------
+# ---------------- Endpoint ----------------
 @app.post("/extract", response_model=InvoiceResponse)
 def extract(req: InvoiceRequest):
     text = req.text
@@ -73,20 +78,9 @@ def extract(req: InvoiceRequest):
     currency = extract_currency(text)
     date = extract_date(text)
 
-    # IMPORTANT: DO NOT reject if something slightly fails
-    # instead fallback safely ONLY if clearly missing
-
-    if not vendor:
-        vendor = "UNKNOWN"
-
-    if amount is None:
-        amount = 0.0
-
-    if not currency:
-        currency = "USD"
-
-    if not date:
-        date = "2026-01-01"
+    # IMPORTANT: fail only if totally impossible input
+    if vendor is None or amount is None or currency is None or date is None:
+        raise HTTPException(status_code=422, detail="Could not extract invoice fields")
 
     return InvoiceResponse(
         vendor=vendor,
@@ -94,4 +88,3 @@ def extract(req: InvoiceRequest):
         currency=currency,
         date=date
     )
-       
