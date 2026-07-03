@@ -1,27 +1,25 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 
 app = FastAPI()
 
-# ===== CORS (required by grader browser) =====
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ===== API KEY =====
+# ---------------- CONFIG ----------------
 API_KEY = "ak_k4vnorqbpda2y1qkg55q0z4i"
-
-# ===== EMAIL (replace if platform gives yours) =====
 EMAIL = "23f3003685@ds.study.iitm.ac.in"
 
 
-# ===== Request Models =====
+# ---------------- MODELS ----------------
 class Event(BaseModel):
     user: str
     amount: float
@@ -32,12 +30,20 @@ class Payload(BaseModel):
     events: List[Event]
 
 
-# ===== Endpoint =====
+# ---------------- HEALTH ----------------
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
+# ---------------- ANALYTICS ----------------
 @app.post("/analytics")
-def analytics(payload: Payload, request: Request):
-    # ---- AUTH ----
-    key = request.headers.get("X-API-Key")
-    if key != API_KEY:
+def analytics(
+    payload: Payload,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    # AUTH CHECK
+    if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     events = payload.events
@@ -46,25 +52,20 @@ def analytics(payload: Payload, request: Request):
 
     unique_users = set()
     revenue = 0.0
-
     user_totals = {}
 
-    # ---- PROCESS EVENTS ----
+    # PROCESS EVENTS
     for e in events:
         unique_users.add(e.user)
 
         if e.amount > 0:
             revenue += e.amount
-            user_totals[e.user] = user_totals.get(e.user, 0) + e.amount
+            user_totals[e.user] = user_totals.get(e.user, 0.0) + e.amount
 
-    # ---- TOP USER ----
+    # TOP USER
     top_user = None
-    top_value = float("-inf")
-
-    for user, total in user_totals.items():
-        if total > top_value:
-            top_value = total
-            top_user = user
+    if user_totals:
+        top_user = max(user_totals, key=user_totals.get)
 
     return {
         "email": EMAIL,
@@ -73,9 +74,3 @@ def analytics(payload: Payload, request: Request):
         "revenue": revenue,
         "top_user": top_user
     }
-
-
-# ===== Health check (optional but good practice) =====
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok"}
