@@ -88,9 +88,16 @@ def check_rate_limit(client_id: str):
 def root():
     return {"status": "running"}
 
-
 @app.get("/ping")
-def ping():
+def ping(
+    x_client_id: Optional[str] = Header(None, alias="X-Client-Id")
+):
+    client = x_client_id or "anonymous"
+
+    limited = check_rate_limit(client)
+    if limited:
+        return limited
+
     return {"status": "ok"}
 
 
