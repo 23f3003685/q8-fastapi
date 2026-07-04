@@ -1,32 +1,22 @@
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Header, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from typing import Optional, Dict, List
 import time
 import uuid
 import base64
-from typing import Optional, Dict, List
 
 app = FastAPI()
 
-# =========================
+# ==========================
 # ASSIGNED VALUES
-# =========================
-T = 52   # total orders
-R = 18   # requests per 10 seconds
+# ==========================
+T = 52   # Total orders
+R = 18   # Requests per 10 seconds
 
-# =========================
-# DATA
-# =========================
-orders = [{"id": i, "item": f"order_{i}"} for i in range(1, T + 1)]
-
-# Idempotency storage
-idempotency_store: Dict[str, Dict] = {}
-
-# Rate limit storage: client_id -> timestamps
-rate_store: Dict[str, List[float]] = {}
-
-# =========================
-# CORS (IMPORTANT FOR GRADER)
-# =========================
+# ==========================
+# CORS
+# ==========================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,63 +25,97 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
-# RATE LIMITING
-# =========================
-def rate_limit(client_id: str):
+# ==========================
+# DATA
+# ==========================
+orders = [{"id": i, "item": f"order_{i}"} for i in range(1, T + 1)]
+
+idempotency_store: Dict[str, Dict] = {}
+rate_store: Dict[str, List[float]] = {}
+
+WINDOW = 10
+
+
+# ==========================
+# CURSOR HELPERS
+# ==========================
+def encode_cursor(index: int) -> str:
+    return base64.urlsafe_b64encode(str(index).encode()).decode()
+
+
+def decode_cursor(cursor: Optional[str]) -> int:
+    if not cursor:
+        return 0
+    try:
+        return int(base64.urlsafe_b64decode(cursor.encode()).decode())
+    except Exception:
+        return 0
+
+
+# ==========================
+# RATE LIMIT
+# ==========================
+def check_rate_limit(client_id: str):
     now = time.time()
-    window = 10
 
-    if client_id not in rate_store:
-        rate_store[client_id] = []
+    timestamps = rate_store.setdefault(client_id, [])
 
-    # keep only last 10 seconds
-    rate_store[client_id] = [
-        t for t in rate_store[client_id] if now - t < window
-    ]
+    # Remove timestamps older than 10 seconds
+    timestamps[:] = [t for t in timestamps if now - t < WINDOW]
 
-    if len(rate_store[client_id]) >= R:
-        retry_after = int(window - (now - rate_store[client_id][0]))
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded",
-            headers={"Retry-After": str(max(retry_after, 1))}
+    if len(timestamps) >= R:
+        retry_after = max(
+            1,
+            int(WINDOW - (now - timestamps[0]))
         )
 
-    rate_store[client_id].append(now)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded"},
+            headers={
+                "Retry-After": str(retry_after)
+            },
+        )
+
+    timestamps.append(now)
+    return None
 
 
-# =========================
-# CURSOR ENCODING
-# =========================
-def encode_cursor(i: int) -> str:
-    return base64.urlsafe_b64encode(str(i).encode()).decode()
-
-def decode_cursor(c: str) -> int:
-    if not c:
-        return 0
-    return int(base64.urlsafe_b64decode(c.encode()).decode())
+# ==========================
+# ROOT
+# ==========================
+@app.get("/")
+def root():
+    return {"status": "running"}
 
 
-# =========================
-# 1. IDEMPOTENT POST /orders
-# =========================
-@app.post("/orders")
-async def create_order(
-    request: Request,
-    idempotency_key: Optional[str] = Header(None),
-    x_client_id: Optional[str] = Header(None, alias="X-Client-Id")
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
+
+
+# ==========================
+# IDEMPOTENT ORDER CREATION
+# ==========================
+@app.post("/orders", status_code=status.HTTP_201_CREATED)
+def create_order(
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    x_client_id: Optional[str] = Header(None, alias="X-Client-Id"),
 ):
-    if not x_client_id:
-        raise HTTPException(400, "Missing X-Client-Id")
-
-    rate_limit(x_client_id)
-
     if not idempotency_key:
-        raise HTTPException(400, "Missing Idempotency-Key")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Missing Idempotency-Key"},
+        )
 
-    # return same response if repeated
+    client = x_client_id or "anonymous"
+
+    limited = check_rate_limit(client)
+    if limited:
+        return limited
+
     if idempotency_key in idempotency_store:
+        # Same response, same order id
         return idempotency_store[idempotency_key]
 
     order = {
@@ -100,43 +124,41 @@ async def create_order(
     }
 
     idempotency_store[idempotency_key] = order
-    return order
+
+    return JSONResponse(
+        status_code=201,
+        content=order,
+    )
 
 
-# =========================
-# 2. CURSOR PAGINATION
-# =========================
+# ==========================
+# CURSOR PAGINATION
+# ==========================
 @app.get("/orders")
-async def get_orders(
+def list_orders(
     limit: int = 10,
     cursor: Optional[str] = None,
-    x_client_id: Optional[str] = Header(None, alias="X-Client-Id")
+    x_client_id: Optional[str] = Header(None, alias="X-Client-Id"),
 ):
-    if not x_client_id:
-        raise HTTPException(400, "Missing X-Client-Id")
+    client = x_client_id or "anonymous"
 
-    rate_limit(x_client_id)
+    limited = check_rate_limit(client)
+    if limited:
+        return limited
+
+    if limit < 1:
+        limit = 1
 
     start = decode_cursor(cursor)
-    end = start + limit
+    end = min(start + limit, len(orders))
 
     items = orders[start:end]
 
-    next_cursor = encode_cursor(end) if end < len(orders) else None
+    next_cursor = None
+    if end < len(orders):
+        next_cursor = encode_cursor(end)
 
     return {
         "items": items,
-        "next_cursor": next_cursor
+        "next_cursor": next_cursor,
     }
-
-
-# =========================
-# HEALTH CHECK
-# =========================
-@app.get("/")
-def home():
-    return {"status": "running"}
-
-@app.get("/ping")
-def ping():
-    return {"status": "ok"}
