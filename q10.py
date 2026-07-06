@@ -1,50 +1,58 @@
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
 import time
 
 app = FastAPI()
 
-# =========================
-# CORS (GRADER SAFE)
-# =========================
+B = 13
+WINDOW = 10
+
+rate_store = {}
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # important for graders
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID", "X-Process-Time"],
 )
 
-# =========================
-# MIDDLEWARE: REQUEST ID + PROCESS TIME
-# =========================
 @app.middleware("http")
-async def telemetry_middleware(request: Request, call_next):
-    start_time = time.time()
+async def middleware(request: Request, call_next):
+    start = time.time()
 
-    # request id
-    req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    request.state.request_id = req_id
+    # Request ID
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
 
-    # process request
-    response = await call_next(request)
+    # Rate limiting
+    client_id = request.headers.get("X-Client-Id", "anonymous")
+    now = time.time()
 
-    # process time
-    process_time = time.time() - start_time
+    requests = rate_store.setdefault(client_id, [])
+    requests[:] = [t for t in requests if now - t < WINDOW]
 
-    # attach headers
-    response.headers["X-Request-ID"] = req_id
+    if len(requests) >= B:
+        response = JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded"}
+        )
+    else:
+        requests.append(now)
+        response = await call_next(request)
+
+    process_time = time.time() - start
+
+    response.headers["X-Request-ID"] = request_id
     response.headers["X-Process-Time"] = str(process_time)
 
     return response
 
 
-# =========================
-# ENDPOINT
-# =========================
 @app.get("/ping")
-def ping(request: Request):
+async def ping(request: Request):
     return {
         "email": "23f3003685@ds.study.iitm.ac.in",
         "request_id": request.state.request_id
