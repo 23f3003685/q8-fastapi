@@ -11,7 +11,7 @@ class InvoiceRequest(BaseModel):
     text: str
 
 # ======================
-# RESPONSE MODEL (IMPORTANT)
+# RESPONSE MODEL
 # ======================
 class InvoiceResponse(BaseModel):
     vendor: str
@@ -23,9 +23,8 @@ class InvoiceResponse(BaseModel):
 # ======================
 # HELPERS
 # ======================
-AMOUNT_REGEX = r"(\d+(?:\.\d+)?)"
-DATE_REGEX = r"(\d{4}-\d{2}-\d{2})"
 CURRENCY_REGEX = r"\b(USD|EUR|GBP)\b"
+DATE_REGEX = r"\b(\d{4}-\d{2}-\d{2})\b"
 
 
 # ======================
@@ -40,22 +39,30 @@ def extract_invoice(payload: InvoiceRequest):
 
     try:
         # ----------------------
-        # VENDOR (first meaningful line / before amount)
+        # VENDOR (best effort)
         # ----------------------
-        vendor_match = re.search(r"([A-Za-z0-9\-\s&.,]+?(Ltd|Inc|LLC|Industries|Corp)[^\n]*)", text)
+        vendor_match = re.search(
+            r"([A-Za-z0-9\-\s&.,]+?(Ltd|Inc|LLC|Industries|Corp)[^\n]*)",
+            text,
+            re.IGNORECASE
+        )
         vendor = vendor_match.group(0).strip() if vendor_match else "UNKNOWN"
 
         # ----------------------
-        # AMOUNT
+        # AMOUNT (FIXED LOGIC)
+        # IMPORTANT: take MAX numeric value
         # ----------------------
-        amounts = re.findall(AMOUNT_REGEX, text)
-        amount = float(amounts[-1]) if amounts else 0.0  # usually total is last number
+        numbers = re.findall(r"\d+\.\d+|\d+", text)
+
+        amount = 0.0
+        if numbers:
+            amount = max(float(n) for n in numbers)
 
         # ----------------------
         # CURRENCY
         # ----------------------
         currency_match = re.search(CURRENCY_REGEX, text)
-        currency = currency_match.group(1) if currency_match else "USD"
+        currency = currency_match.group(1).upper() if currency_match else "USD"
 
         # ----------------------
         # DATE
