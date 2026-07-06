@@ -21,7 +21,7 @@ idempotency_store: Dict[str, Dict] = {}
 rate_store: Dict[str, List[float]] = {}
 
 # ======================
-# CORS (safe for grader)
+# CORS
 # ======================
 app.add_middleware(
     CORSMiddleware,
@@ -31,35 +31,41 @@ app.add_middleware(
     ],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Retry-After"],
+    expose_headers=["Retry-After", "X-Request-ID"],
 )
 
 # ======================
-# RATE LIMIT
+# RATE LIMIT (IMPORTANT FIX)
 # ======================
 def rate_limit(client_id: str):
     now = time.time()
     store = rate_store.setdefault(client_id, [])
 
+    # remove old requests
     store[:] = [t for t in store if now - t < WINDOW]
 
+    # limit exceeded
     if len(store) >= R:
         retry_after = str(int(WINDOW - (now - store[0])))
 
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
-            headers={"Retry-After": retry_after}
+            headers={
+                "Retry-After": retry_after,
+            },
         )
 
     store.append(now)
     return None
 
+
 # ======================
-# CURSOR
+# CURSOR HELPERS
 # ======================
 def encode_cursor(i: int) -> str:
     return base64.urlsafe_b64encode(str(i).encode()).decode()
+
 
 def decode_cursor(c: Optional[str]) -> int:
     if not c:
@@ -69,10 +75,24 @@ def decode_cursor(c: Optional[str]) -> int:
     except:
         return 0
 
-# ======================
-# ENDPOINTS
-# ======================
 
+# ======================
+# HEALTH
+# ======================
+@app.get("/ping")
+def ping(x_client_id: Optional[str] = Header(None, alias="X-Client-Id")):
+    client = x_client_id or "anonymous"
+
+    rl = rate_limit(client)
+    if rl:
+        return rl
+
+    return {"status": "ok"}
+
+
+# ======================
+# IDEMPOTENT CREATE ORDER
+# ======================
 @app.post("/orders", status_code=201)
 def create_order(
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
@@ -87,18 +107,22 @@ def create_order(
     if not idempotency_key:
         return JSONResponse(status_code=400, content={"error": "Missing Idempotency-Key"})
 
+    # return same order if key exists
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
 
     order = {
         "id": str(uuid.uuid4()),
-        "status": "created"
+        "status": "created",
     }
 
     idempotency_store[idempotency_key] = order
     return order
 
 
+# ======================
+# CURSOR PAGINATION
+# ======================
 @app.get("/orders")
 def get_orders(
     limit: int = 10,
@@ -118,5 +142,5 @@ def get_orders(
 
     return {
         "items": items,
-        "next_cursor": encode_cursor(end) if end < len(orders_db) else None
+        "next_cursor": encode_cursor(end) if end < len(orders_db) else None,
     }
