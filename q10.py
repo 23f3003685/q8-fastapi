@@ -1,59 +1,71 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uuid
 import time
+import uuid
 
 app = FastAPI()
 
-B = 13
+EMAIL = "23f3003685@ds.study.iitm.ac.in"
+
 WINDOW = 10
+BUCKET_SIZE = 13
 
 rate_store = {}
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://app-0zhox4.example.com",
+        "https://exam.sanand.workers.dev",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-Process-Time"],
+    expose_headers=["X-Request-ID"],
 )
 
-@app.middleware("http")
-async def middleware(request: Request, call_next):
-    start = time.time()
 
+@app.middleware("http")
+async def request_context_and_rate_limit(request: Request, call_next):
     # Request ID
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request_id = request.headers.get("X-Request-ID")
+    if not request_id:
+        request_id = str(uuid.uuid4())
+
     request.state.request_id = request_id
 
     # Rate limiting
     client_id = request.headers.get("X-Client-Id", "anonymous")
     now = time.time()
 
-    requests = rate_store.setdefault(client_id, [])
-    requests[:] = [t for t in requests if now - t < WINDOW]
+    if client_id not in rate_store:
+        rate_store[client_id] = []
 
-    if len(requests) >= B:
+    # Remove expired timestamps
+    rate_store[client_id] = [
+        t for t in rate_store[client_id]
+        if now - t < WINDOW
+    ]
+
+    if len(rate_store[client_id]) >= BUCKET_SIZE:
         response = JSONResponse(
             status_code=429,
-            content={"detail": "Rate limit exceeded"}
+            content={"detail": "Rate limit exceeded"},
         )
-    else:
-        requests.append(now)
-        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
-    process_time = time.time() - start
+    rate_store[client_id].append(now)
 
+    response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
-    response.headers["X-Process-Time"] = str(process_time)
-
     return response
 
 
 @app.get("/ping")
 async def ping(request: Request):
     return {
-        "email": "23f3003685@ds.study.iitm.ac.in",
-        "request_id": request.state.request_id
+        "email": EMAIL,
+        "request_id": request.state.request_id,
     }
