@@ -7,19 +7,14 @@ import uuid
 
 app = FastAPI()
 
-# =========================
-# CONFIG
-# =========================
 EMAIL = "23f3003685@ds.study.iitm.ac.in"
+
 WINDOW = 10
 BUCKET_SIZE = 13
 
-# client_id -> timestamps
 rate_store = defaultdict(deque)
 
-# =========================
-# CORS (STRICT BUT CORRECT)
-# =========================
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -28,66 +23,50 @@ app.add_middleware(
     ],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
+    expose_headers=["X-Request-ID", "X-Process-Time"],
 )
 
-# =========================
-# MIDDLEWARE
-# =========================
+
 @app.middleware("http")
 async def middleware(request: Request, call_next):
     start = time.time()
 
-    # ---------------------
-    # REQUEST ID LOGIC
-    # ---------------------
-    request_id = request.headers.get("X-Request-ID")
-    if not request_id:
-        request_id = str(uuid.uuid4())
-
+    # REQUEST ID
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.request_id = request_id
 
-    # ---------------------
-    # RATE LIMITING
-    # ---------------------
+    # RATE LIMIT
     client_id = request.headers.get("X-Client-Id", "anonymous")
     now = time.time()
 
     q = rate_store[client_id]
 
-    # remove expired timestamps
     while q and now - q[0] > WINDOW:
         q.popleft()
 
-    # check limit
+    # IF RATE LIMITED
     if len(q) >= BUCKET_SIZE:
         response = JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
         )
+
+        # ⚠️ MANUALLY ADD CORS HEADERS (IMPORTANT FIX)
+        response.headers["Access-Control-Allow-Origin"] = "https://exam.sanand.workers.dev"
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Process-Time"] = str(time.time() - start)
         return response
 
     q.append(now)
 
-    # ---------------------
-    # NORMAL REQUEST
-    # ---------------------
     response = await call_next(request)
 
-    # ---------------------
-    # RESPONSE HEADERS
-    # ---------------------
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Process-Time"] = str(time.time() - start)
 
     return response
 
 
-# =========================
-# ENDPOINT
-# =========================
 @app.get("/ping")
 async def ping(request: Request):
     return {
